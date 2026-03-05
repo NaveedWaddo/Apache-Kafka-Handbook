@@ -65,7 +65,7 @@ Partition 2: [Msg@0] → [Msg@3] → [Msg@6] → [Msg@9] ...
 An **Offset** is a **unique, sequential, integer ID** assigned to each message within a partition.
 
 - Offsets start at `0` and increase by 1 for each new message
-- Offsets are **partition-scoped** — Partition 0 has offsets 0,1,2,3... and Partition 1 also has its own offsets 0,1,2,3...
+- Offsets are **partition-scoped** — Partition 0 has offsets 0,1,2,3... and Partition 1 also has its own independent offsets 0,1,2,3...
 - Kafka uses offsets to track **where each consumer group has read up to**
 - Consumers commit their offset to tell Kafka: "I've processed up to here"
 
@@ -77,10 +77,10 @@ Partition 0:
               ↑
     Consumer Group "billing" has committed offset 1
     (meaning it has processed messages 0 and 1,
-     next it will read offset 2)
+     next it will fetch offset 2)
 ```
 
-**Three special offset positions:**
+**Three special offset reset positions:**
 ```
 auto.offset.reset = "earliest"  → Start from offset 0 (oldest available message)
 auto.offset.reset = "latest"    → Start from the next NEW message (skip history)
@@ -124,7 +124,7 @@ A **Message** (also called a **Record** in Kafka's official terminology) is the 
 **The Key is critical for partitioning:**
 - If key is `null` → messages are distributed **round-robin** across partitions
 - If key is set → Kafka hashes the key (murmur2 hash) and routes to a **deterministic partition**
-- Same key = same partition = **ordering guaranteed** for that key
+- Same key = same partition = **ordering guaranteed for that key**
 
 ```
 order_id="A" → hash → Partition 0  (always)
@@ -132,7 +132,7 @@ order_id="B" → hash → Partition 2  (always)
 order_id="C" → hash → Partition 1  (always)
 ```
 
-This ensures all events for `order_id="A"` are ordered — critical for event sourcing.
+This ensures all events for `order_id="A"` are always ordered — critical for event sourcing.
 
 ---
 
@@ -143,35 +143,35 @@ This ensures all events for `order_id="A"` are ordered — critical for event so
 ```
 TOPIC: "payments"  (3 partitions, replication-factor=2)
 
-                   ┌─── BROKER 1 ────────────────────────────────┐
-                   │  Partition 0 (LEADER)                        │
-                   │  [off:0|$50] [off:1|$30] [off:2|$80]  →     │
-                   │                                              │
-                   │  Partition 2 (REPLICA)                       │
-                   │  [off:0|$90] [off:1|$10]               →     │
-                   └──────────────────────────────────────────────┘
+                   ┌─── BROKER 1 ─────────────────────────────────┐
+                   │  Partition 0 (LEADER)                         │
+                   │  [off:0|$50] [off:1|$30] [off:2|$80]  →      │
+                   │                                               │
+                   │  Partition 2 (REPLICA)                        │
+                   │  [off:0|$90] [off:1|$10]               →      │
+                   └───────────────────────────────────────────────┘
 
-                   ┌─── BROKER 2 ────────────────────────────────┐
-                   │  Partition 1 (LEADER)                        │
-                   │  [off:0|$20] [off:1|$70] [off:2|$15]  →     │
-                   │                                              │
-                   │  Partition 0 (REPLICA)                       │
-                   │  [off:0|$50] [off:1|$30] [off:2|$80]  →     │
-                   └──────────────────────────────────────────────┘
+                   ┌─── BROKER 2 ─────────────────────────────────┐
+                   │  Partition 1 (LEADER)                         │
+                   │  [off:0|$20] [off:1|$70] [off:2|$15]  →      │
+                   │                                               │
+                   │  Partition 0 (REPLICA)                        │
+                   │  [off:0|$50] [off:1|$30] [off:2|$80]  →      │
+                   └───────────────────────────────────────────────┘
 
-                   ┌─── BROKER 3 ────────────────────────────────┐
-                   │  Partition 2 (LEADER)                        │
-                   │  [off:0|$90] [off:1|$10]               →     │
-                   │                                              │
-                   │  Partition 1 (REPLICA)                       │
-                   │  [off:0|$20] [off:1|$70] [off:2|$15]  →     │
-                   └──────────────────────────────────────────────┘
+                   ┌─── BROKER 3 ─────────────────────────────────┐
+                   │  Partition 2 (LEADER)                         │
+                   │  [off:0|$90] [off:1|$10]               →      │
+                   │                                               │
+                   │  Partition 1 (REPLICA)                        │
+                   │  [off:0|$20] [off:1|$70] [off:2|$15]  →      │
+                   └───────────────────────────────────────────────┘
 
 
 Consumer Group: "fraud-detector"
-  Consumer A  →  reads Partition 0 (committed at offset 2)
-  Consumer B  →  reads Partition 1 (committed at offset 1)
-  Consumer C  →  reads Partition 2 (committed at offset 0)
+  Consumer A  →  reads Partition 0  (committed at offset 2)
+  Consumer B  →  reads Partition 1  (committed at offset 1)
+  Consumer C  →  reads Partition 2  (committed at offset 0)
 ```
 
 ### Message Flow Step-by-Step
@@ -184,161 +184,272 @@ Step 2: Kafka client hashes the key
 
 Step 3: Producer sends to Broker 2 (leader of Partition 1)
 
-Step 4: Broker 2 appends message to Partition 1's log
+Step 4: Broker 2 appends message to Partition 1 log
          Assigns offset = 3 (next available)
 
 Step 5: Broker 2 replicates to Broker 3 (follower of Partition 1)
 
-Step 6: Broker 2 acknowledges to producer (if acks=all)
+Step 6: Broker 2 ACKs to producer (if acks=all)
 
 Step 7: Consumer in "fraud-detector" group polls Partition 1
-         Gets message at offset 3
+         Receives message at offset 3
 
 Step 8: Consumer processes it, commits offset 4
-         (meaning "I'm done with everything up to and including offset 3")
+         ("I'm done with everything up to and including offset 3")
 ```
 
 ---
 
 ## ⚙️ 3. How It Works Internally
 
-### Partition Assignment and Key Hashing
-
-```python
-# Kafka's default partitioner (simplified)
-def get_partition(key: bytes, num_partitions: int) -> int:
-    if key is None:
-        # Round-robin across partitions
-        return round_robin_counter % num_partitions
-    else:
-        # murmur2 hash of key bytes
-        hash_value = murmur2(key)
-        return abs(hash_value) % num_partitions
-```
-
-### Offset Commit Storage
-
-Consumer offsets are stored in a special internal Kafka topic: **`__consumer_offsets`**
+### Partition Key Hashing (Kafka's Default Partitioner)
 
 ```
-__consumer_offsets topic stores:
-  Key:   (consumer_group_id, topic, partition)
-  Value: committed_offset
+Kafka DefaultPartitioner logic (simplified):
 
-Example:
-  ("fraud-detector", "payments", 0) → offset: 2
-  ("fraud-detector", "payments", 1) → offset: 1
-  ("fraud-detector", "payments", 2) → offset: 0
+if (key == null) {
+    use StickyPartitionCache (round-robin per batch)
+} else {
+    partition = abs(murmur2(keyBytes)) % numPartitions
+}
 ```
 
-This means even if a consumer crashes, when it restarts it asks Kafka:  
-*"Where did my group last stop on this partition?"* and resumes from there.
+The **murmur2** hash is fast and produces a good distribution — the same key will always yield the same partition number **as long as the partition count stays the same**.
+
+> ⚠️ If you increase partitions later, `hash(key) % newCount` changes, breaking the old mapping.
 
 ---
 
-### Log Segments (How Partitions are Stored on Disk)
+### Offset Commit Storage — `__consumer_offsets`
 
-Each partition is stored as a series of **segment files** on disk:
+Consumer offsets (progress tracking) are stored in a special internal Kafka topic:
 
 ```
-/kafka-logs/payments-0/          ← Partition 0 directory
-    00000000000000000000.log     ← Segment: offsets 0 to 999
-    00000000000000001000.log     ← Segment: offsets 1000 to 1999
-    00000000000000002000.log     ← Segment: offsets 2000 onwards (active)
-    00000000000000000000.index   ← Sparse index: offset → file position
-    00000000000000000000.timeindex ← Timestamp index
+Topic: __consumer_offsets
+
+Key:   (consumer_group_id, topic_name, partition_number)
+Value: committed_offset
+
+Example records:
+  ("fraud-detector", "payments", 0) → 2
+  ("fraud-detector", "payments", 1) → 1
+  ("fraud-detector", "payments", 2) → 0
 ```
 
-- Only the **last (active) segment** is written to
-- Kafka can delete/compact old segments based on retention policy
-- The **index files** allow O(1) random access to any offset
+When a consumer restarts, it queries this topic:
+*"Where did my group (`fraud-detector`) last stop on `payments`, partition 0?"*  
+Answer: offset 2 → so resume from offset 3.
 
 ---
 
-## 💻 4. Code Examples
+### Log Segments — How Partitions Are Stored on Disk
 
-### Creating a Topic with Partitions (Admin API)
-
-```python
-from kafka.admin import KafkaAdminClient, NewTopic
-
-admin = KafkaAdminClient(bootstrap_servers="localhost:9092")
-
-topic = NewTopic(
-    name="order-created",
-    num_partitions=6,         # 6 partitions for parallelism
-    replication_factor=3      # 3 copies for fault tolerance
-)
-
-admin.create_topics([topic])
-print("Topic created!")
+```
+/kafka-logs/payments-0/                ← Partition 0 directory
+    00000000000000000000.log           ← Segment: offsets 0–999
+    00000000000000001000.log           ← Segment: offsets 1000–1999
+    00000000000000002000.log           ← Active segment (being written)
+    00000000000000000000.index         ← Sparse offset→file-position index
+    00000000000000000000.timeindex     ← Timestamp index
 ```
 
-### Producer with Explicit Key (Ordering per entity)
+- Only the **last segment** is actively written to (append-only)
+- Old segments are eligible for **deletion** (time/size retention) or **compaction**
+- Index files enable **O(1)** lookup for any offset
 
-```python
-from kafka import KafkaProducer
-import json
+---
 
-producer = KafkaProducer(
-    bootstrap_servers=['localhost:9092'],
-    key_serializer=str.encode,
-    value_serializer=lambda v: json.dumps(v).encode('utf-8')
-)
+## 💻 4. Code Examples (Java + Spring Boot)
 
-# All events for order "O-100" go to the SAME partition
-# This guarantees ordering for this specific order
-for event in ['created', 'paid', 'shipped', 'delivered']:
-    producer.send(
-        topic='order-events',
-        key='O-100',           # ← key determines partition
-        value={'order_id': 'O-100', 'status': event}
-    )
+### Creating a Topic Programmatically
 
-producer.flush()
+```java
+package com.example.kafka.config;
+
+import org.apache.kafka.clients.admin.NewTopic;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.config.TopicBuilder;
+
+@Configuration
+public class KafkaTopicConfig {
+
+    @Bean
+    public NewTopic orderCreatedTopic() {
+        return TopicBuilder.name("order-created")
+                .partitions(6)          // 6 partitions for parallelism
+                .replicas(3)            // 3 replicas for fault tolerance
+                .build();
+    }
+
+    @Bean
+    public NewTopic paymentsTopic() {
+        return TopicBuilder.name("payments")
+                .partitions(12)
+                .replicas(3)
+                .config("retention.ms", "604800000")   // 7 days
+                .config("compression.type", "lz4")
+                .build();
+    }
+}
+```
+> Spring Boot auto-creates these topics on startup via `KafkaAdmin`.
+
+---
+
+### Producer with Explicit Key (Ordering per Entity)
+
+```java
+package com.example.kafka.producer;
+
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
+import org.springframework.stereotype.Service;
+
+import java.util.concurrent.CompletableFuture;
+
+@Service
+public class OrderEventProducer {
+
+    private static final String TOPIC = "order-events";
+    private final KafkaTemplate<String, String> kafkaTemplate;
+
+    public OrderEventProducer(KafkaTemplate<String, String> kafkaTemplate) {
+        this.kafkaTemplate = kafkaTemplate;
+    }
+
+    public void sendOrderEvent(String orderId, String status) {
+        String payload = String.format(
+            "{\"order_id\":\"%s\", \"status\":\"%s\"}", orderId, status
+        );
+
+        // key = orderId → all events for this order go to the SAME partition
+        // This guarantees: created → paid → shipped → delivered are in order
+        CompletableFuture<SendResult<String, String>> future =
+            kafkaTemplate.send(TOPIC, orderId, payload);
+
+        future.whenComplete((result, ex) -> {
+            if (ex == null) {
+                System.out.printf(
+                    "Sent [orderId=%s] → partition=%d, offset=%d%n",
+                    orderId,
+                    result.getRecordMetadata().partition(),
+                    result.getRecordMetadata().offset()
+                );
+            } else {
+                System.err.println("Failed to send: " + ex.getMessage());
+            }
+        });
+    }
+
+    // Send a sequence of events for the same order
+    public void sendOrderLifecycle(String orderId) {
+        for (String status : new String[]{"CREATED", "PAID", "SHIPPED", "DELIVERED"}) {
+            sendOrderEvent(orderId, status);
+        }
+    }
+}
 ```
 
-### Consumer Reading with Offset Control
+---
 
-```python
-from kafka import KafkaConsumer, TopicPartition
+### Consumer with Full Message Metadata
 
-consumer = KafkaConsumer(bootstrap_servers=['localhost:9092'])
+```java
+package com.example.kafka.consumer;
 
-# Manually assign a specific partition and offset
-tp = TopicPartition('order-events', partition=0)
-consumer.assign([tp])
-consumer.seek(tp, offset=50)   # Start reading from offset 50
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.header.Header;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.stereotype.Service;
 
-for message in consumer:
-    print(f"Offset {message.offset}: {message.value}")
-    if message.offset >= 100:  # Read only offsets 50-100
-        break
+@Service
+public class OrderEventConsumer {
+
+    @KafkaListener(topics = "order-events", groupId = "fraud-detector")
+    public void consume(ConsumerRecord<String, String> record) {
+
+        // Access all message metadata
+        System.out.println("=== Message Received ===");
+        System.out.println("Topic     : " + record.topic());
+        System.out.println("Partition : " + record.partition());
+        System.out.println("Offset    : " + record.offset());
+        System.out.println("Key       : " + record.key());
+        System.out.println("Value     : " + record.value());
+        System.out.println("Timestamp : " + record.timestamp());
+
+        // Access headers
+        for (Header header : record.headers()) {
+            System.out.printf("Header    : %s = %s%n",
+                header.key(), new String(header.value()));
+        }
+    }
+}
 ```
 
-### Inspecting Message Metadata
+---
 
-```python
-from kafka import KafkaConsumer
+### Producer with Custom Headers
 
-consumer = KafkaConsumer(
-    'payments',
-    bootstrap_servers=['localhost:9092'],
-    group_id='my-group',
-    auto_offset_reset='earliest',
-    value_deserializer=lambda v: v.decode('utf-8')
-)
+```java
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.internals.RecordHeader;
 
-for msg in consumer:
-    print(f"""
-    Topic:     {msg.topic}
-    Partition: {msg.partition}
-    Offset:    {msg.offset}
-    Key:       {msg.key}
-    Value:     {msg.value}
-    Timestamp: {msg.timestamp}
-    Headers:   {msg.headers}
-    """)
+public void sendWithHeaders(String orderId, String payload) {
+    ProducerRecord<String, String> record = new ProducerRecord<>(
+        "order-events",   // topic
+        null,             // partition (null = let Kafka decide via key)
+        orderId,          // key
+        payload           // value
+    );
+
+    // Add custom headers (metadata, tracing, versioning)
+    record.headers().add(new RecordHeader("source", "checkout-service".getBytes()));
+    record.headers().add(new RecordHeader("version", "v2".getBytes()));
+    record.headers().add(new RecordHeader("trace-id", "abc-123-xyz".getBytes()));
+
+    kafkaTemplate.send(record);
+}
+```
+
+---
+
+### Seek to Specific Offset (Manual Offset Control)
+
+```java
+package com.example.kafka.consumer;
+
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.listener.ConsumerSeekAware;
+import org.springframework.stereotype.Service;
+
+import java.util.Map;
+
+@Service
+public class ReplayConsumer implements ConsumerSeekAware {
+
+    // Seek to offset 50 on partition 0 when consumer starts
+    @Override
+    public void onPartitionsAssigned(
+            Map<TopicPartition, Long> assignments,
+            ConsumerSeekCallback callback) {
+
+        assignments.forEach((partition, currentOffset) -> {
+            if (partition.partition() == 0) {
+                callback.seek(partition.topic(), partition.partition(), 50);
+                System.out.println("Seeked partition 0 to offset 50");
+            }
+        });
+    }
+
+    @KafkaListener(topics = "order-events", groupId = "replay-group")
+    public void consume(ConsumerRecord<String, String> record) {
+        System.out.printf("Replaying: offset=%d value=%s%n",
+            record.offset(), record.value());
+    }
+}
 ```
 
 ---
@@ -347,52 +458,54 @@ for msg in consumer:
 
 | Config | Default | Explanation |
 |--------|---------|-------------|
-| `num.partitions` | 1 | Default partitions for auto-created topics |
-| `replication.factor` | 1 | Number of copies per partition |
-| `retention.ms` | 604800000 (7 days) | How long messages are kept |
+| `num.partitions` | 1 | Default partition count for auto-created topics |
+| `replication.factor` | 1 | Number of replica copies per partition |
+| `retention.ms` | 604800000 (7 days) | How long messages are retained |
 | `retention.bytes` | -1 (unlimited) | Max size per partition before deletion |
-| `auto.offset.reset` | latest | Where consumer starts if no offset exists |
-| `enable.auto.commit` | true | Auto-commit offset periodically |
-| `auto.commit.interval.ms` | 5000 | Frequency of auto offset commit |
-| `log.segment.bytes` | 1GB | Size at which a new log segment is created |
+| `auto.offset.reset` | latest | Where consumer starts with no committed offset |
+| `enable.auto.commit` | true | Auto-commit offset on a timer |
+| `auto.commit.interval.ms` | 5000 | Frequency of auto offset commits |
+| `log.segment.bytes` | 1073741824 (1 GB) | Size at which a new log segment is created |
 
 ---
 
 ## 🔄 6. Real-World Scenarios
 
-### Scenario: Choosing the Right Number of Partitions
+### Choosing Partition Count
 
-**Rule of thumb:**
 ```
-Target Throughput (msgs/sec)
-─────────────────────────────  =  Minimum Partitions Needed
-Throughput per Partition
+Formula:
+  Required Partitions = Target Throughput / Throughput Per Partition
+
+Example:
+  Target: 1 GB/s
+  Each partition handles ~50 MB/s
+  → 1000 MB / 50 MB = 20 partitions minimum
+
+  Add headroom for 3x spikes: 20 × 3 = 60 partitions
+  Round to nearest broker multiple: 64 partitions (8 brokers × 8)
 ```
 
-Kafka can handle ~10-100 MB/s per partition (varies by hardware).
-
-- If you need 1 GB/s throughput and each partition handles ~50 MB/s → **20 partitions**
-- More partitions = more parallelism but also more overhead (file handles, replication traffic)
-- **You can increase partitions later, but you cannot decrease them**
-- Adding partitions breaks key-based ordering for existing keys (keys rehash to new partitions)
-
-**Recommended practice:** Start with more partitions than you think you need (e.g., 12 or 24), as reducing is not possible.
+**Rules:**
+- You can **increase** partitions later but **never decrease**
+- Increasing partitions **breaks key ordering** (keys rehash to new partitions)
+- Start with more than you think you need (12, 24, 48 are common starting points)
 
 ---
 
-### Scenario: Null Key vs. Keyed Messages
+### Null Key vs. Keyed Messages
 
 ```
 Use NULL key when:
-  - You don't need ordering
-  - You want even load distribution
-  - e.g., logs, metrics, click events
+  ✅ Ordering does not matter
+  ✅ You want even load distribution
+  ✅ Logs, metrics, click events, audit trails
 
-Use a KEY when:
-  - You need ordering per entity
-  - e.g., all events for user_id="u123" must be ordered
-  - e.g., all updates for order_id="o456" must be in sequence
-  - e.g., CDC (Change Data Capture) — changes per row
+Use a specific KEY when:
+  ✅ Ordering matters per entity
+  ✅ All events for user_id="u123" must be sequentially ordered
+  ✅ All updates for order_id="o456" must be in sequence
+  ✅ Change Data Capture (CDC) — all changes for a row/entity
 ```
 
 ---
@@ -401,84 +514,85 @@ Use a KEY when:
 
 | Pitfall | Consequence | Fix |
 |---------|-------------|-----|
-| Using `null` keys when order matters | Events for the same entity can go to different partitions, breaking order | Always use a meaningful key (user_id, order_id) |
-| Too few partitions | Can't scale consumers beyond partition count | Plan for growth; start with 6-12+ partitions |
-| Too many partitions | Increased memory, replication overhead, longer failover | Don't create thousands of partitions per topic |
-| Misunderstanding offset scope | Thinking offset 5 in partition 0 = offset 5 in partition 1 | Offsets are **per-partition**; they are independent |
-| Not committing offsets | On restart, consumer reprocesses from start | Ensure reliable offset commit strategy |
-| Using earliest without idempotency | On restart, duplicate messages get processed | Make consumers idempotent or use exactly-once |
+| Using `null` keys when order matters | Same entity's events split across partitions | Use entity ID (user_id, order_id) as key |
+| Too few partitions at launch | Can't scale consumers beyond partition count | Start with 6–12+ partitions, plan for growth |
+| Too many partitions | Memory overhead, longer leader election on failure | Don't create thousands per topic |
+| Confusing offset scope | Thinking offset 5 in P0 = same message as offset 5 in P1 | Offsets are **per-partition** and fully independent |
+| Not committing offsets | On crash/restart, consumer reprocesses from scratch | Use reliable commit strategy (covered in Topic 06) |
+| Increasing partitions on live topic | Key → partition routing changes, breaks ordering | Plan partition count upfront; scale via consumer groups instead |
 
 ---
 
 ## 🎯 8. Interview Questions
 
 **Q1. What is a Kafka partition and why does it exist?**
-> A partition is an ordered, immutable log that is a subdivision of a topic. Partitions exist for **scalability and parallelism** — they allow a topic's data to be spread across multiple brokers and consumed in parallel by multiple consumers simultaneously.
+> A partition is an ordered, immutable log subdivision of a topic. Partitions enable **horizontal scalability and parallelism** — they spread data across brokers and let multiple consumers read simultaneously, each handling a subset of partitions.
 
 **Q2. Are messages ordered in Kafka?**
-> Kafka guarantees ordering **within a partition**, not across partitions. If you need all events for a specific entity to be ordered (e.g., all updates for order_id="X"), use that entity's ID as the message key — Kafka will always route the same key to the same partition.
+> Kafka guarantees ordering **within a partition only**. To guarantee ordering for a specific entity (e.g., all events for order_id="X"), use that entity's ID as the message key. Kafka will consistently route the same key to the same partition via murmur2 hashing.
 
 **Q3. What is an offset and where is it stored?**
-> An offset is a monotonically increasing integer that uniquely identifies a message within a partition. Consumer offsets (tracking how far each consumer group has read) are stored in the internal Kafka topic `__consumer_offsets`.
+> An offset is a monotonically increasing integer that uniquely identifies a message within a partition. Consumer group offsets (tracking read progress) are stored in the internal Kafka topic `__consumer_offsets`.
 
-**Q4. What happens if you increase the number of partitions on an existing topic?**
-> You can increase partitions but **never decrease**. The problem is that existing key-to-partition mappings change — `hash(key) % old_partitions` ≠ `hash(key) % new_partitions`. This breaks ordering guarantees for keyed messages that were previously routed consistently.
+**Q4. What happens if you increase partitions on an existing topic?**
+> You can increase but **never decrease** partitions. The problem: existing key→partition mappings change because `hash(key) % oldCount ≠ hash(key) % newCount`. This **breaks the ordering guarantee** for previously stable keyed messages.
 
 **Q5. What is the difference between a topic and a partition?**
-> A **topic** is a logical name/category for a stream of records. A **partition** is the physical unit of storage and parallelism within a topic. One topic has 1 to N partitions, each being an independent ordered log.
+> A **topic** is a logical name/category for a stream of records. A **partition** is the physical, ordered log that is the unit of storage and parallelism inside a topic. One topic = 1 to N partitions, each an independent append-only log.
 
-**Q6. How does Kafka route messages with a key?**
-> Kafka uses the **murmur2 hash** of the key's bytes, then `abs(hash) % num_partitions` to determine the partition. The same key always produces the same partition assignment (for a given number of partitions).
+**Q6. How does Kafka route a message with a key?**
+> Kafka applies the **murmur2 hash** to the key's bytes, then `abs(hash) % numPartitions`. The same key always maps to the same partition, guaranteeing ordering for that key. Without a key, Spring Kafka uses sticky partitioning (fills one partition's batch before switching).
 
 ---
 
 ## 🧠 9. Scenario-Based Interview Problems
 
 ### Scenario 1: "The Ordering Nightmare"
-> **Problem:** You have a payment processing system. A user upgrades their plan, then immediately makes a payment. Sometimes the payment is processed before the upgrade, causing it to fail. Both events go to the same Kafka topic with 10 partitions. How do you fix this?
+> **Problem:** A payment system has two events: `USER_UPGRADED` and `PAYMENT_PROCESSED`. Sometimes payment is processed before the upgrade is recorded, causing failures. Both go to the same Kafka topic with 10 partitions. How do you fix it?
 
-**Answer:**  
-The root cause is **no key set** — events for the same user are landing on different partitions and being consumed by different consumer instances in any order.
+**Answer:**
+Root cause: **no key set** — events for the same user land on different partitions, consumed by different threads with no ordering.
 
-**Fix:** Use `user_id` as the Kafka message key.
-```python
-producer.send('user-events', key=str(user_id), value=event_data)
+**Fix in Spring Boot:**
+```java
+// Before (broken - null key, random partition assignment)
+kafkaTemplate.send("user-events", payload);
+
+// After (fixed - key ensures same user → same partition → ordered)
+kafkaTemplate.send("user-events", userId, payload);
 ```
-Now all events for `user_id=123` always go to the same partition (e.g., Partition 4). The partition's sequential guarantee ensures the upgrade event is always consumed before the payment event for that user.
+Now all events for `userId="u123"` always land on Partition 4 (for example). The partition's sequential guarantee ensures `USER_UPGRADED` is always consumed before `PAYMENT_PROCESSED` for that user.
 
 ---
 
-### Scenario 2: "Exactly How Many Partitions?"
-> **Problem:** Your system needs to process 500,000 messages/sec. Each consumer instance can process 25,000 messages/sec. You also want headroom for 3x traffic spikes. How many partitions?
+### Scenario 2: "How Many Partitions?"
+> **Problem:** System needs 500,000 msgs/sec. Each consumer handles 25,000 msgs/sec. Plan for 3x traffic spikes. How many partitions?
 
 **Answer:**
 ```
-Normal throughput:  500,000 / 25,000 = 20 consumers needed
-Spike headroom:     20 × 3 = 60 consumers max
+Normal load:       500,000 / 25,000 = 20 consumers needed
+3x spike headroom: 20 × 3           = 60 consumers max
 
-→ You need AT LEAST 60 partitions
-  (max parallelism = number of partitions)
+→ Need at least 60 partitions
+  (max parallelism = partition count)
 
-Practical choice: Round up to 64 or 72 (nice multiples)
-Also account for: replication overhead, broker count
-Rule: partitions should be a multiple of your broker count
-  for even distribution
+Practical choice: 64 partitions (multiple of 8 brokers)
+Also ensure: partitions % broker_count == 0 for even spread
 ```
 
 ---
 
-### Scenario 3: "The Offset Reset Incident"
-> **Problem:** A bug was deployed that processed messages incorrectly for 2 hours. You've fixed the bug. How do you reprocess those 2 hours of messages?
+### Scenario 3: "The Bug Reprocessing Incident"
+> **Problem:** A bad deployment processed messages incorrectly for 2 hours. Bug is now fixed. How do you reprocess those 2 hours of data?
 
-**Answer:**
-1. **Stop the consumer group** (or ensure all consumers are down)
-2. **Find the start offset** corresponding to 2 hours ago using `kafka-consumer-groups.sh --reset-offsets --to-datetime 2024-01-15T08:00:00.000`
-3. **Apply the reset** to set the committed offset back to that point
-4. **Redeploy** consumers with the fix — they'll reread from the reset offset
+**Answer (using Spring Boot + Kafka CLI):**
 
-Since Kafka **retains** messages (unlike traditional MQs), this is possible as long as the messages are within the retention period.
+Since Kafka **retains** messages (unlike traditional MQs):
 
 ```bash
+# Step 1: Stop consumer group (or scale to 0 replicas in k8s)
+
+# Step 2: Reset offsets to 2 hours ago
 kafka-consumer-groups.sh \
   --bootstrap-server localhost:9092 \
   --group billing-service \
@@ -486,33 +600,45 @@ kafka-consumer-groups.sh \
   --reset-offsets \
   --to-datetime 2024-01-15T08:00:00.000 \
   --execute
+
+# Step 3: Redeploy consumers with the fix
+# They will resume from the reset offset and reprocess
 ```
+
+**In Spring Boot** you can also implement a `ConsumerSeekAware` listener to seek to a specific timestamp on startup for programmatic replay.
 
 ---
 
 ## 📝 10. Quick Revision Summary
 
 ```
-✅ TOPIC    = Named logical channel for messages. Multi-subscriber.
-✅ PARTITION = Ordered, immutable log. Unit of parallelism.
-             Ordering guaranteed WITHIN partition only.
-✅ OFFSET   = Sequential ID per message within a partition.
-             Scoped to partition (each partition has its own 0,1,2...)
-             Stored in __consumer_offsets internal topic.
-✅ MESSAGE  = Has: Key, Value, Headers, Timestamp, Offset, Partition
-             Key → determines partition (murmur2 hash % num_partitions)
-             Null key → round-robin distribution
-             Same key → always same partition → ordering per key
+✅ TOPIC      = Named logical channel. Multi-subscriber.
+               Every consumer GROUP gets all messages independently.
+
+✅ PARTITION  = Ordered, immutable log. Unit of parallelism.
+               Ordering guaranteed WITHIN partition only.
+               Max parallelism = number of partitions.
+
+✅ OFFSET     = Sequential ID per message, scoped PER partition.
+               Stored in __consumer_offsets internal topic.
+               Committed offset = "processed everything before this"
+
+✅ MESSAGE    = Key + Value + Headers + Timestamp + Offset + Partition
+               Key  → murmur2 hash % numPartitions = deterministic partition
+               null → sticky/round-robin partitioning (no ordering)
+               Same key → same partition → ordering per key guaranteed
 
 ✅ Key Design Rules:
-   - Use keys when order matters per entity (user_id, order_id)
-   - Use null keys for even load distribution (logs, metrics)
-   - Adding partitions breaks existing key assignments — plan ahead
+   Use keys    → when per-entity ordering matters (user_id, order_id)
+   Null keys   → when distribution matters more than order (logs, metrics)
+   Never increase partitions without a migration plan
 
-✅ Offset Rules:
-   - earliest = start from offset 0
-   - latest   = start from next new message
-   - Committed offset = "I've processed everything before this"
+✅ Spring Boot Quick Reference:
+   TopicBuilder.name().partitions().replicas().build() → create topic
+   kafkaTemplate.send(topic, key, value)               → produce
+   @KafkaListener(topics, groupId)                     → consume
+   ConsumerRecord<K,V>                                 → full message access
+   ConsumerSeekAware                                   → manual offset control
 ```
 
 ---
